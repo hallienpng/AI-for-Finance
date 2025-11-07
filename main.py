@@ -229,6 +229,8 @@ def rerank_docs(query, documents, key):
 
 # --- Example Usage ---
 
+# --- Example Usage (Production RAG Pipeline) ---
+
 if __name__ == "__main__":
     
     # --- 0. Load Data ---
@@ -236,19 +238,16 @@ if __name__ == "__main__":
     try:
         # Читаем ОБЫЧНЫЙ CSV, где разделитель - запятая
         df_train = pd.read_csv('train_data.csv', delimiter=',', skipinitialspace=True)
-        # Убираем пробелы из имен колонок (на всякий случай)
         df_train.columns = df_train.columns.str.strip()
+        # Это все наши документы (контекст)
+        all_documents = df_train['text'].tolist()
 
         # То же самое для файла с вопросами
         df_questions = pd.read_csv('questions.csv', delimiter=',', skipinitialspace=True)
         df_questions.columns = df_questions.columns.str.strip()
 
-        # Теперь колонки 'text' и 'Вопрос' должны быть на месте
-        docs_to_rank = df_train['text'].tolist()
-        test_query = df_questions['Вопрос'].iloc[0]
-        
-        print(f"Data loaded. Found {len(docs_to_rank)} documents.")
-        print(f"Test query: '{test_query}'\n")
+        print(f"Data loaded. Found {len(all_documents)} documents for context.")
+        print(f"Found {len(df_questions)} questions to process for submission.csv\n")
 
     except FileNotFoundError as e:
         print(f"Error: CSV file not found. {e}")
@@ -256,8 +255,7 @@ if __name__ == "__main__":
         exit()
     except KeyError as e:
         print(f"Error: Column not found. {e}")
-        print("CSV-файлы были загружены, но колонка 'text' или 'Вопрос' не найдена.")
-        print("Проверьте реальные имена колонок в файле. Вот что я вижу:")
+        print("CSV-файлы были загружены, но колонка 'text' или 'Вопрос'/'ID вопроса' не найдена.")
         if 'df_train' in locals():
             print(f"Колонки train_data: {list(df_train.columns)}")
         if 'df_questions' in locals():
@@ -267,48 +265,105 @@ if __name__ == "__main__":
         print(f"An error occurred during data loading: {e}")
         exit()
 
-    # --- 1. Get an embedding ---
-    print("--- 1. Testing Embedding API ---")
-    my_text = "This is a test sentence for embedding."
-    embedding = get_embedding(my_text)
-    if embedding:
-        print(f"Embedding successful (first 5 dims): {embedding[:5]}...\n")
-
-    # --- 2. Rerank documents ---
-    print("--- 2. Testing Reranker API ---")
-    # Используем данные из CSV
-    # ВАЖНО: Реранкер может иметь лимит на кол-во документов.
-    # Для теста возьмем первые 10 документов.
-    
-    # !!! ИСПРАВЛЕН КЛЮЧ !!!
-    # Reranker должен использовать свой ключ (DEEPINFRA), а не ключ эмбеддера
-    reranked_results = rerank_docs(test_query, docs_to_rank[:10], key=EMBEDDER_API_KEY)
-    
-    if reranked_results:
-        print("Reranking successful (top 3 results):")
-        top_3 = reranked_results.get('results', [])[:3]
-        print(json.dumps(top_3, indent=2, ensure_ascii=False))
-        print("\n")
-
-    # --- 3. Get a chat completion ---
-    print("--- 3. Testing Chat Completion API ---")
-    # Формируем messages на основе вопроса из CSV
-    messages = [
-        {"role": "system", "content": """Ты — высококвалифицированный финансовый помощник "Al for Finance Bank".
+    # Этот промпт будет использоваться для КАЖДОГО вопроса
+    SYSTEM_PROMPT = """Ты — высококвалифицированный финансовый помощник "Al for Finance Bank".
 Твоя задача - дать четкий и точный ответ на вопрос клиента, используя *только* предоставленные ниже статьи из базы знаний.
 Не придумывай ничего, чего нет в тексте.
 Если в статьях нет ответа на вопрос, вежливо сообщи: "К сожалению, данной информации у меня нет, предлагаю связаться со специалистом на горячей линии."
-Отвечай на русском языке парграфом текста без форматирований."""},
-        {"role": "user", "content": test_query}
-    ]
-    chat_response = get_chat_completion(messages, model=LLM_MODELS['mistral'])
-    if chat_response:
-        print(f"Chatbot response: {chat_response}\n")
+Отвечай на русском языке парграфом текста без форматирований."""
+
+    # --- 2. Process all questions and create submission ---
+    print("--- 2. Starting RAG pipeline to generate submission.csv ---")
+    
+    # Здесь будем хранить результаты
+    results_list = []
+    
+    # Идем по каждому вопросу в df_questions
+    for index, row in df_questions.iterrows():
+        question_id = row['ID вопроса']
+        query = row['Вопрос']
+        
+        print(f"\nProcessing question ID: {question_id} ({index + 1}/{len(df_questions)})...")
+        print(f"  Query: {query[:70]}...")
+
+        # --- RAG Step 1: Retrieve & Rerank ---
+        # Ранжируем ВСЕ документы, чтобы найти лучшие
+        print("  Reranking...")
+        reranked_results = rerank_docs(query, all_documents, key=EMBEDDER_API_KEY)
+
+        print("DEBUG: Reranker response structure (first result):")
+        if reranked_results and 'results' in reranked_results and len(reranked_results['results']) > 0:
+            print(json.dumps(reranked_results['results'][0], indent=2, ensure_ascii=False))
+        else:
+            print("DEBUG: Reranker response is empty or invalid.")
+        
+        chat_response = "" # Ответ по умолчанию
+        
+        if reranked_results and 'results' in reranked_results:
+            # --- RAG Step 2: Augment ---
+            # Берем ТОП-3 лучших документа
+            top_docs = reranked_results.get('results', [])[:3]
+            
+            # 1. Сначала получаем ИНДЕКСЫ из ответа реранкера
+            top_docs_indices = [res['index'] for res in top_docs]
+            # 2. По индексам достаем ТЕКСТ из нашего полного списка
+            top_docs_text = [all_documents[i] for i in top_docs_indices]
+            
+            # Соединяем их в один большой текст (контекст)
+            context = "\n\n---\n\n".join(top_docs_text)
+            
+            print(f"  Found {len(top_docs)} relevant documents.")
+
+            # --- RAG Step 3: Generate ---
+            # Собираем промпт для LLM, ВСТАВЛЯЯ КОНТЕКСТ
+            user_content = f"""Вот статьи из базы знаний:
+            
+{context}
+
+---
+
+Вопрос клиента: {query}"""
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ]
+            
+            print("  Generating answer...")
+            chat_response = get_chat_completion(messages, model=LLM_MODELS['mistral'])
+            
+            if chat_response is None:
+                print("  Error: Chat completion failed.")
+                chat_response = "ОШИБКА: Не удалось сгенерировать ответ."
+            else:
+                print(f"  Response: {chat_response[:70]}...")
+        
+        else:
+            print("  Error: Reranking failed or returned no results.")
+            chat_response = "ОШИБКА: Не удалось найти релевантные документы."
+
+        # --- RAG Step 4: Store ---
+        # Добавляем результат в наш список
+        results_list.append({
+            "ID вопроса": question_id,
+            "Вопрос": query,
+            "Ответы на вопрос": chat_response
+        })
+
+    # --- 3. Save to CSV ---
+    print("\n--- 3. Saving submission file ---")
+    try:
+        df_submission = pd.DataFrame(results_list)
+        # index=False, чтобы не добавлять лишнюю колонку с индексами
+        df_submission.to_csv("submission.csv", index=False)
+        print("Successfully saved results to submission.csv")
+    except Exception as e:
+        print(f"Error saving CSV: {e}")
 
     # --- 4. Check the log file ---
-    print(f"--- 4. Review 'money_used.txt' for cost breakdown ---")
+    print(f"\n--- 4. Review 'money_used.txt' for cost breakdown ---")
     try:
         with open("money_used.txt", "r", encoding="utf-8") as f:
             print(f.read())
     except FileNotFoundError:
-        print("Log file not created yet (perhaps all API calls failed).")
+        print("Log file not created yet.")
