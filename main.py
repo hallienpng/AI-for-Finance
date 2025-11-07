@@ -134,7 +134,7 @@ def get_embedding(text_to_embed, model=EMBEDDER_MODELS['small']):
             cost=cost
         )
         
-        return response.data.embedding
+        return response.data[0].embedding
     except Exception as e:
         print(f"Error getting embedding: {e}")
         return None
@@ -172,7 +172,7 @@ def get_chat_completion(messages, model=LLM_MODELS['mistral']):
             cost=cost
         )
         
-        return response.choices.message.content
+        return response.choices[0].message.content
     except Exception as e:
         print(f"Error in chat completion: {e}")
         return None
@@ -181,7 +181,8 @@ def rerank_docs(query, documents, key):
     """
     Reranks documents using the specified API and logs the estimated cost.
     """
-    url = "https://ai-for-finance-hack.up.railway.app/rerank" # Updated URL
+    url = "https://ai-for-finance-hack.up.railway.app/rerank"
+    
     model = "deepinfra/Qwen/Qwen3-Reranker-4B"
     
     headers = {
@@ -189,15 +190,15 @@ def rerank_docs(query, documents, key):
         "Authorization": f"Bearer {key}"
     }
     
+    # 2. ТЕПЕРЬ 'model' можно безопасно добавить в payload
     payload = {
+        "model": model,  # <-- Вот исправление, которое я предлагал
         "query": query,
         "documents": documents
     }
     
     try:
         # --- Cost Estimation (Client-Side) ---
-        # We must calculate tokens *before* sending, as the API might not return them.
-        # We tokenize the query + all documents to get the total processed tokens.
         query_tokens = len(ENCODER.encode(query))
         doc_tokens = sum(len(ENCODER.encode(doc)) for doc in documents)
         total_input_tokens = query_tokens + doc_tokens
@@ -209,13 +210,13 @@ def rerank_docs(query, documents, key):
             component="reranker",
             model_name=model,
             input_tokens=total_input_tokens,
-            output_tokens=0,  # Rerankers don't have "output tokens" in the same way
+            output_tokens=0,
             cost=cost
         )
         
         # --- Actual API Call ---
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status() 
         
         return response.json()
     
