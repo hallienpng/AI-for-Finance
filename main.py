@@ -145,7 +145,7 @@ def get_chat_completion(messages, model=LLM_MODELS['mistral']):
     """
     client = OpenAI(
         base_url="https://ai-for-finance-hack.up.railway.app/",
-        api_key=LLM_API_KEY,
+        api_key=LLM_API_KEY
     )
     
     try:
