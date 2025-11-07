@@ -2,6 +2,8 @@ rag/
 data/
 submission.csv
 train_data.index
+train_data.csv
+questions.csv
 docs.pkl
 subsis
 
