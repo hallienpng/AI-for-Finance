@@ -32,7 +32,7 @@ DOCS_PATH = "docs.pkl"
 
 
 # =====================================================
-# MARKDOWN CLEANING (сохраняем заголовки ##)
+# MARKDOWN CLEANING
 # =====================================================
 def clean_markdown_text(text: str):
     if not isinstance(text, str):
@@ -51,16 +51,9 @@ def clean_markdown_text(text: str):
 # SAFE ASYNC REQUESTS
 # =====================================================
 async def safe_embed_call(client, texts, retries=5):
-    """
-    Асинхронный вызов эмбеддингов.
-    Возвращает list[list[float]] или None при ошибке.
-    """
     for attempt in range(1, retries + 1):
         try:
-            r = await client.embeddings.create(
-                model=EMBED_MODEL,
-                input=texts
-            )
+            r = await client.embeddings.create(model=EMBED_MODEL, input=texts)
             return [x.embedding for x in r.data]
         except Exception as e:
             if attempt == retries:
@@ -72,9 +65,6 @@ async def safe_embed_call(client, texts, retries=5):
 
 
 async def safe_llm_call(client, prompt, retries=5):
-    """
-    Асинхронный вызов LLM (чтобы получить текст ответа).
-    """
     for attempt in range(1, retries + 1):
         try:
             r = await client.chat.completions.create(
@@ -97,12 +87,9 @@ async def safe_llm_call(client, prompt, retries=5):
 
 
 # =====================================================
-# PARSING / CHUNKING
+# SECTION PARSING
 # =====================================================
 def parse_sections(doc_id, text, annotation, tags):
-    """
-    Разбиваем документ по '##' на секции с базовой метаинформацией.
-    """
     sections = []
     parts = re.split(r'\n##\s*', text)
     prefix = parts[0].strip()
@@ -138,19 +125,20 @@ def parse_sections(doc_id, text, annotation, tags):
     return sections
 
 
+# =====================================================
+# CHUNKING
+# =====================================================
 def chunk_section(section, chunk_size=800, overlap=80, min_len=100):
-    """
-    Разбиваем секцию на чанки с помощью RecursiveCharacterTextSplitter.
-    Возвращаем список dict-чанков (без эмбеддингов).
-    """
     text = section["section_text"]
     chunks = []
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
         length_function=len,
         separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
     )
+
     parts = splitter.split_text(text)
     chunk_idx = 0
     for part in parts:
@@ -171,54 +159,81 @@ def chunk_section(section, chunk_size=800, overlap=80, min_len=100):
 
 
 # =====================================================
-# KEYWORD EXTRACTION (простая версия — regexp + stopwords + bigrams)
+# LLM-BASED KEYWORD EXTRACTION
 # =====================================================
-RUS_STOPWORDS = {
-    "и","в","во","не","что","он","на","я","с","со","как","а","то","все","она","так",
-    "его","но","да","ты","к","у","же","вы","за","бы","по","только","ее","мне","было",
-    "вот","от","меня","еще","нет","о","из","ему","теперь","когда","даже","ну","вдруг",
-    "ли","если","уже","или","ни","быть","был","него","до","вас","нибудь","опять",
-    "уж","вам","ведь","там","потом","себя","ничего","ей","может","они","тут","где",
-    "есть","надо","ней","для","мы","тебя","их","чем","была","сам","чтоб","без","будто",
-    "чего","раз","тоже","себе","под","будет","ж","тогда","кто","этот","того","потому"
-}
+async def extract_query_keywords(question: str):
+    prompt = f"""
+Ты — ассистент по анализу текстов. 
+По следующему вопросу выдели только ключевые слова и словосочетания, которые максимально отражают смысл вопроса. 
+Приводи слова к основной форме (лемматизируй) — не учитывай склонения, окончания или разные типы слова. 
+Например, "мошеннические списания" → "мошенничество". 
+Не включай стоп-слова вроде "и", "в", "как", "на", "что". 
+Каждое ключевое слово или словосочетание — отдельная фраза, не более 3 слов. 
+Выводи результат в виде JSON-массива строк.
 
+Вопрос:
+{question}
+"""
+    llm_client = AsyncOpenAI(
+        base_url="https://ai-for-finance-hack.up.railway.app/",
+        api_key=LLM_API_KEY
+    )
+    try:
+        response = await safe_llm_call(llm_client, prompt)
+        if not response:
+            raise ValueError("пустой ответ LLM")
 
-def extract_query_keywords(question: str, min_len=3):
-    """
-    Простая token-based обработка вопроса: токены + биграммы, без лемматизации.
-    """
-    if not isinstance(question, str) or not question.strip():
-        return []
-    text = question.lower()
-    tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text)
-    lemmas = [t for t in tokens if len(t) >= min_len and t not in RUS_STOPWORDS]
-    bigrams = [lemmas[i] + " " + lemmas[i + 1] for i in range(len(lemmas) - 1)]
-    return list(set(lemmas + bigrams))
+        # пробуем достать JSON из текста
+        try:
+            keywords = json.loads(response)
+        except json.JSONDecodeError:
+            # ищем первый JSON-массив в тексте
+            match = re.search(r'\[.*\]', response, flags=re.DOTALL)
+            if match:
+                keywords = json.loads(match.group())
+            else:
+                raise
+
+        if isinstance(keywords, list):
+            return [k.lower() for k in keywords if isinstance(k, str)]
+        else:
+            return []
+
+    except Exception as e:
+        print("❌ Ошибка LLM при получении ключевых слов:", e)
+        # fallback к простому regexp
+        tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", question.lower())
+        RUS_STOPWORDS = {
+            "и","в","во","не","что","он","на","я","с","со","как","а","то","все","она","так",
+            "его","но","да","ты","к","у","же","вы","за","бы","по","только","ее","мне","было",
+            "вот","от","меня","еще","нет","о","из","ему","теперь","когда","даже","ну","вдруг",
+            "ли","если","уже","или","ни","быть","был","него","до","вас","нибудь","опять",
+            "уж","вам","ведь","там","потом","себя","ничего","ей","может","они","тут","где",
+            "есть","надо","ней","для","мы","тебя","их","чем","была","сам","чтоб","без","будто",
+            "чего","раз","тоже","себе","под","будет","ж","тогда","кто","этот","того","потому"
+        }
+        return list(set([t for t in tokens if t not in RUS_STOPWORDS and len(t) > 2]))
+
 
 
 # =====================================================
 # INDEX BUILDING
 # =====================================================
 async def build_index():
-    """
-    1) Загружает train_data.csv
-    2) Разбивает на секции и чанки
-    3) Генерирует эмбеддинги батчами
-    4) Сохраняет FAISS index + docs.pkl (включая embedding в каждой записи)
-    """
     print("📁 Загрузка train_data.csv ...")
     df = pd.read_csv("train_data.csv")
 
     print("🧠 Парсим документы...")
     all_chunks = []
+
     for row in df.itertuples():
         doc_id = getattr(row, "id")
         raw_tags = getattr(row, "tags")
         try:
             tags = json.loads(raw_tags.replace("'", '"'))
-        except Exception:
+        except:
             tags = []
+
         annotation = getattr(row, "annotation")
         text = clean_markdown_text(getattr(row, "text"))
         sections = parse_sections(doc_id, text, annotation, tags)
@@ -236,7 +251,6 @@ async def build_index():
     print("⚡ async embedding...")
     vectors = []
     valid_chunks = []
-
     batch_size = 50
     tasks = []
     for i in range(0, len(all_chunks), batch_size):
@@ -245,7 +259,6 @@ async def build_index():
 
     results = await tqdm_asyncio.gather(*tasks)
 
-    # Собираем результаты, сохраняем embedding прямо в объект chunk
     idx = 0
     for r in results:
         batch = all_chunks[idx:idx + batch_size]
@@ -271,73 +284,44 @@ async def build_index():
 
     with open(DOCS_PATH, "wb") as f:
         pickle.dump(valid_chunks, f)
-
     print("✅ index + docs saved")
 
 
 # =====================================================
-# RERANK HELPER
+# RETRIEVAL
 # =====================================================
 def rerank_docs(query, documents, key):
-    """
-    Позвоночник реранка: отправляем запрос на внешний /rerank и возвращаем parsed JSON.
-    Важно: возвращаем dict с полем "results" (как у провайдера).
-    """
     url = "https://ai-for-finance-hack.up.railway.app/rerank"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {key}"
-    }
-    payload = {
-        "model": "deepinfra/Qwen/Qwen3-Reranker-4B",
-        "query": query,
-        "documents": documents
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    payload = {"model": "deepinfra/Qwen/Qwen3-Reranker-4B", "query": query, "documents": documents}
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-    except Exception as e:
-        print("❌ rerank request failed:", e)
-        return {"results": []}
-
+    resp = requests.post(url, headers=headers, json=payload)
     try:
         data = resp.json()
         return data
     except Exception:
-        print("❌ error parsing rerank response:", resp.text)
+        print("❌ error in rerank_docs response:", resp.text)
         return {"results": []}
 
 
-# =====================================================
-# RETRIEVAL (tag-prefilter + sub-FAISS + rerank)
-# =====================================================
-async def retrieve(question, k=3, prefilter_top=50, faiss_top=30):
-    """
-    1) извлекаем простые keywords
-    2) фильтруем документы по тегам (soft prefilter)
-    3) строим временный под-индекс из отобранных документов (с их embedding)
-    4) делаем FAISS поиск + rerank (Qwen)
-    5) возвращаем список dict-документов (top-k)
-    """
+async def retrieve(question, k=3, prefilter_top=50, faiss_top=60):
     print("\n=== RETRIEVE ===")
     print(f"[+] question: {question}")
 
-    kw = extract_query_keywords(question)
+    kw = await extract_query_keywords(question)
     print(f"[+] keywords: {kw}")
 
-    # загружаем глобальный индекс и документы
     index = faiss.read_index(INDEX_PATH)
     with open(DOCS_PATH, "rb") as f:
         docs = pickle.load(f)
 
-    # TAG SOFT-PREFILTER: считаем простое совпадение токенов тега и kw
     candidate_docs = []
     for doc in docs:
-        tags = doc.get("tags", []) or []
+        tags = doc.get("tags", [])
         score = 0
         for t in tags:
-            t_tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", str(t).lower())
-            for tt in t_tokens:
+            t_norm = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", t.lower())
+            for tt in t_norm:
                 if tt in kw:
                     score += 2
                 elif any(tt in term for term in kw):
@@ -348,36 +332,23 @@ async def retrieve(question, k=3, prefilter_top=50, faiss_top=30):
     if candidate_docs:
         candidate_docs.sort(key=lambda x: x[1], reverse=True)
         selected_docs = [x[0] for x in candidate_docs[:prefilter_top]]
-        print(f"[+] tag-match docs: {len(selected_docs)}")
+        print(f"[+] filtered docs: {len(selected_docs)}")
     else:
-        print("[!] no tag match → using all docs")
         selected_docs = docs
+        print("[!] no tag match → using all docs")
 
-    # embed query
-    embed_client = AsyncOpenAI(
-        base_url="https://ai-for-finance-hack.up.railway.app/",
-        api_key=EMBEDDER_API_KEY
-    )
+    embed_client = AsyncOpenAI(base_url="https://ai-for-finance-hack.up.railway.app/", api_key=EMBEDDER_API_KEY)
     qvec = await safe_embed_call(embed_client, [question])
-    if not qvec:
-        print("❌ failed to embed question → returning empty")
-        return []
     qvec = np.array(qvec[0], dtype="float32").reshape(1, -1)
 
-    # build sub-index from selected_docs (use saved embeddings)
-    print("[+] building temp index for filtered docs...")
-    vectors = []
-    doc_objs = []
+    vectors, doc_objs = [], []
     for d in selected_docs:
-        if "embedding" in d and d["embedding"] is not None:
-            vectors.append(d["embedding"])
-            doc_objs.append(d)
-        else:
-            # логируем, но не падаем
-            print("❌ doc without embedding (skipped):", d.get("doc_id", "unknown"))
+        if "embedding" not in d:
+            continue
+        vectors.append(d["embedding"])
+        doc_objs.append(d)
 
     if not vectors:
-        print("[!] fallback to global index (no embeddings in selected docs)")
         D, I = index.search(qvec, k)
         return [docs[i] for i in I[0]]
 
@@ -389,44 +360,31 @@ async def retrieve(question, k=3, prefilter_top=50, faiss_top=30):
     faiss_docs = [doc_objs[i] for i in I[0]]
     print(f"[+] faiss top docs: {len(faiss_docs)}")
 
-    # RERANK via external API
-    print("[+] reranking...")
-    texts_for_rerank = [d["text"] for d in faiss_docs]
-    res = rerank_docs(query=question, documents=texts_for_rerank, key=EMBEDDER_API_KEY)
-
+    res = rerank_docs(question, [d["text"] for d in faiss_docs], key=EMBEDDER_API_KEY)
     entries = res.get("results", []) if isinstance(res, dict) else []
-    if entries:
-        # сортировка по relevance_score (если есть)
-        if isinstance(entries[0], dict) and "relevance_score" in entries[0]:
-            entries = sorted(entries, key=lambda x: x.get("relevance_score", 0), reverse=True)
-        rerank_indices = [x["index"] for x in entries]
-        print("[+] rerank indices:", rerank_indices[:k])
 
-        final_docs = []
-        for idx in rerank_indices[:k]:
-            if 0 <= idx < len(faiss_docs):
-                final_docs.append(faiss_docs[idx])
+    if entries:
+        entries = sorted(entries, key=lambda x: x.get("relevance_score", 0), reverse=True)
+        rerank_indices = [x["index"] for x in entries]
+        final_docs = [faiss_docs[idx] for idx in rerank_indices[:k] if 0 <= idx < len(faiss_docs)]
         print(f"[+] final retrieved: {len(final_docs)}")
         return final_docs
     else:
-        print("[!] rerank empty → fallback faiss subset")
         return faiss_docs[:k]
 
 
 # =====================================================
-# ANSWERING (формирование prompt и вызов LLM)
+# ANSWERING
 # =====================================================
 async def answer_generation(question):
     ctx_docs = await retrieve(question, k=3)
-    # ctx_docs — список dict
-    ctx = "\n\n".join([c["text"] for c in ctx_docs]) if ctx_docs else ""
+    ctx = "\n\n".join([c["text"] for c in ctx_docs])
 
     prompt = f"""
-Ты — высококвалифицированный финансовый помощник.
-Отвечай строго на основе контекста ниже.
-Не придумывай факты, которых нет в тексте.
-Если ответа в тексте нет — так и скажи: "К сожалению, я не могу ответить на данный вопрос."
-Отвечай полно, развёрнуто и по делу. Язык: русский.
+Ты — эксперт по финансовым вопросам. Отвечай строго на основе контекста ниже. 
+Если в тексте нет прямого ответа, объясни максимально подробно, опираясь на доступную информацию, не придумывая фактов.
+Если вопрос касается законов, сумм, сроков — используй только данные из контекста. Отвечай полно, развёрнуто и по делу.
+
 
 Контекст:
 {ctx}
@@ -437,16 +395,12 @@ async def answer_generation(question):
 Ответ:
 """.strip()
 
-    llm_client = AsyncOpenAI(
-        base_url="https://ai-for-finance-hack.up.railway.app/",
-        api_key=LLM_API_KEY
-    )
-
+    llm_client = AsyncOpenAI(base_url="https://ai-for-finance-hack.up.railway.app/", api_key=LLM_API_KEY)
     return await safe_llm_call(llm_client, prompt)
 
 
 # =====================================================
-# MAIN (входной/выходной контракт сохраняется)
+# MAIN
 # =====================================================
 async def main():
     print("🔍 Проверяем наличие индекса...")
@@ -457,7 +411,7 @@ async def main():
         print("✅ Индекс найден")
 
     print("📁 Загружаем questions.csv ...")
-    df = pd.read_csv("questions copy.csv")
+    df = pd.read_csv("questions.csv")
     qs = df["Вопрос"].tolist()
 
     print("💬 Генерируем ответы...")
@@ -471,3 +425,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
