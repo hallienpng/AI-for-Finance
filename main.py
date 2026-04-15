@@ -19,21 +19,19 @@ LLM_API_KEY = os.getenv("LLM_API_KEY")
 EMBEDDER_API_KEY = os.getenv("EMBEDDER_API_KEY")
 
 if not EMBEDDER_API_KEY:
-    raise ValueError("❌ EMBEDDER_API_KEY not found")
+    raise ValueError("EMBEDDER_API_KEY not found")
 
 if not LLM_API_KEY:
-    raise ValueError("❌ LLM_API_KEY not found")
+    raise ValueError("LLM_API_KEY not found")
 
-EMBED_MODEL = "text-embedding-3-small"
-LLM_MODEL = "openrouter/mistralai/mistral-small-3.2-24b-instruct"
+EMBED_MODEL = "text-embedding-ada-002"
+LLM_MODEL = "openrouter/x-ai/grok-3-mini"
 
 INDEX_PATH = "train_data.index"
 DOCS_PATH = "docs.pkl"
 
 
-# =====================================================
 # MARKDOWN CLEANING
-# =====================================================
 def clean_markdown_text(text: str):
     if not isinstance(text, str):
         return text
@@ -47,9 +45,7 @@ def clean_markdown_text(text: str):
     return text.strip()
 
 
-# =====================================================
 # SAFE ASYNC REQUESTS
-# =====================================================
 async def safe_embed_call(client, texts, retries=5):
     for attempt in range(1, retries + 1):
         try:
@@ -57,10 +53,10 @@ async def safe_embed_call(client, texts, retries=5):
             return [x.embedding for x in r.data]
         except Exception as e:
             if attempt == retries:
-                print(f"❌ EMBEDDING FAIL: {e}")
+                print(f"EMBEDDING FAIL: {e}")
                 return None
             wait = 2 + attempt * 2 + random.random() * 2
-            print(f"⚠️ embed retry {attempt}/{retries}, wait {wait:.1f}s")
+            print(f"embed retry {attempt}/{retries}, wait {wait:.1f}s")
             await asyncio.sleep(wait)
 
 
