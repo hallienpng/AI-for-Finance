@@ -1,4 +1,4 @@
-# AI for Finance Hack 2025 (Qualification Round)
+# AI for Finance Hackathon 2025
 
 Система автоматической генерации ответов на финансовые вопросы на русском языке с использованием RAG-подхода.
 
