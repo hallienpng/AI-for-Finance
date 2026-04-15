@@ -25,7 +25,7 @@ if not LLM_API_KEY:
     raise ValueError("LLM_API_KEY not found")
 
 EMBED_MODEL = "text-embedding-ada-002"
-LLM_MODEL = "openrouter/x-ai/grok-3-mini"
+LLM_MODEL = "openrouter/google/gemma-3-27b-it"
 
 INDEX_PATH = "train_data.index"
 DOCS_PATH = "docs.pkl"
@@ -71,20 +71,19 @@ async def safe_llm_call(client, prompt, retries=5):
             return r.choices[0].message.content
         except RateLimitError:
             wait = 5 + attempt * 3 + random.random() * 2
-            print(f"⚠️ RateLimit {attempt}/{retries}, wait {wait:.1f}s")
+            print(f"RateLimit {attempt}/{retries}, wait {wait:.1f}s")
             await asyncio.sleep(wait)
         except Exception as e:
             if attempt == retries:
-                print(f"❌ LLM FAIL: {e}")
+                print(f"LLM FAIL: {e}")
                 return "Ошибка при генерации ответа."
             wait = 2 + attempt * 2
-            print(f"⚠️ LLM retry {attempt}/{retries}, wait {wait:.1f}s")
+            print(f"LLM retry {attempt}/{retries}, wait {wait:.1f}s")
             await asyncio.sleep(wait)
 
 
-# =====================================================
+
 # SECTION PARSING
-# =====================================================
 def parse_sections(doc_id, text, annotation, tags):
     sections = []
     parts = re.split(r'\n##\s*', text)
@@ -121,9 +120,7 @@ def parse_sections(doc_id, text, annotation, tags):
     return sections
 
 
-# =====================================================
 # CHUNKING
-# =====================================================
 def chunk_section(section, chunk_size=800, overlap=80, min_len=100):
     text = section["section_text"]
     chunks = []
@@ -154,9 +151,8 @@ def chunk_section(section, chunk_size=800, overlap=80, min_len=100):
     return chunks
 
 
-# =====================================================
 # LLM-BASED KEYWORD EXTRACTION
-# =====================================================
+# Достаём keywords из вопросов с помощью llm, чтобы их использовать для поиска подхлдящих статей
 async def extract_query_keywords(question: str):
     prompt = f"""
 Ты — ассистент по анализу текстов. 
@@ -196,7 +192,7 @@ async def extract_query_keywords(question: str):
             return []
 
     except Exception as e:
-        print("❌ Ошибка LLM при получении ключевых слов:", e)
+        print("Ошибка LLM при получении ключевых слов:", e)
         # fallback к простому regexp
         tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", question.lower())
         RUS_STOPWORDS = {
@@ -212,14 +208,12 @@ async def extract_query_keywords(question: str):
 
 
 
-# =====================================================
 # INDEX BUILDING
-# =====================================================
 async def build_index():
-    print("📁 Загрузка train_data.csv ...")
+    print("Загрузка train_data.csv ...")
     df = pd.read_csv("train_data.csv")
 
-    print("🧠 Парсим документы...")
+    print("Парсим документы...")
     all_chunks = []
 
     for row in df.itertuples():
@@ -237,14 +231,14 @@ async def build_index():
             ch = chunk_section(sec)
             all_chunks.extend(ch)
 
-    print(f"✅ total chunks: {len(all_chunks)}")
+    print(f"total chunks: {len(all_chunks)}")
 
     embed_client = AsyncOpenAI(
         base_url="https://ai-for-finance-hack.up.railway.app/",
         api_key=EMBEDDER_API_KEY
     )
 
-    print("⚡ async embedding...")
+    print("async embedding...")
     vectors = []
     valid_chunks = []
     batch_size = 50
@@ -268,24 +262,22 @@ async def build_index():
         idx += batch_size
 
     vectors = np.array(vectors).astype("float32")
-    print(f"✅ valid vectors: {vectors.shape[0]}")
+    print(f"valid vectors: {vectors.shape[0]}")
 
     if vectors.shape[0] == 0:
-        raise RuntimeError("❌ Ни один документ не удалось векторизовать!")
+        raise RuntimeError("Ни один документ не удалось векторизовать!")
 
-    print("📦 building FAISS index...")
+    print("building FAISS index...")
     index = faiss.IndexFlatL2(vectors.shape[1])
     index.add(vectors)
     faiss.write_index(index, INDEX_PATH)
 
     with open(DOCS_PATH, "wb") as f:
         pickle.dump(valid_chunks, f)
-    print("✅ index + docs saved")
+    print("index + docs saved")
 
 
-# =====================================================
 # RETRIEVAL
-# =====================================================
 def rerank_docs(query, documents, key):
     url = "https://ai-for-finance-hack.up.railway.app/rerank"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
@@ -296,7 +288,7 @@ def rerank_docs(query, documents, key):
         data = resp.json()
         return data
     except Exception:
-        print("❌ error in rerank_docs response:", resp.text)
+        print("error in rerank_docs response:", resp.text)
         return {"results": []}
 
 
@@ -369,9 +361,7 @@ async def retrieve(question, k=3, prefilter_top=50, faiss_top=60):
         return faiss_docs[:k]
 
 
-# =====================================================
 # ANSWERING
-# =====================================================
 async def answer_generation(question):
     ctx_docs = await retrieve(question, k=3)
     ctx = "\n\n".join([c["text"] for c in ctx_docs])
@@ -405,26 +395,25 @@ async def answer_generation(question):
     return await safe_llm_call(llm_client, prompt)
 
 
-# =====================================================
 # MAIN (с батчами и промежуточным сохранением)
-# =====================================================
+# для того, чтобы не перегружать память
 async def main():
-    print("🔍 Проверяем наличие индекса...")
+    print("Проверяем наличие индекса...")
     if not (os.path.exists(INDEX_PATH) and os.path.exists(DOCS_PATH)):
-        print("⚙️ Индекса нет → создаём...")
+        print("Индекса нет → создаём...")
         await build_index()
     else:
-        print("✅ Индекс найден")
+        print("Индекс найден")
 
-    print("📁 Загружаем questions.csv ...")
-    df = pd.read_csv("questions.csv")
+    print("Загружаем questions.csv ...")
+    df = pd.read_csv("questions copy.csv")
 
     batch_size = 25
     all_answers = []
 
     for start_idx in range(0, len(df), batch_size):
         batch = df.iloc[start_idx:start_idx + batch_size]
-        print(f"💬 Обрабатываем вопросы {start_idx+1}–{start_idx+len(batch)}...")
+        print(f"Обрабатываем вопросы {start_idx+1}–{start_idx+len(batch)}...")
 
         tasks = [answer_generation(q) for q in batch["Вопрос"].tolist()]
         answers = await tqdm_asyncio.gather(*tasks)
@@ -438,13 +427,13 @@ async def main():
             })
 
         # Сохраняем промежуточно
-        pd.DataFrame(all_answers).to_csv("submission.csv", index=False)
-        print(f"✅ Батч {start_idx+1}–{start_idx+len(batch)} сохранён, память очищена.")
+        pd.DataFrame(all_answers).to_csv("submission cp.csv", index=False)
+        print(f"Батч {start_idx+1}–{start_idx+len(batch)} сохранён, память очищена.")
 
         # Очищаем временные данные для экономии RAM
         del tasks, answers, batch
 
-    print("✅ Все вопросы обработаны, submission.csv готов")
+    print("Все вопросы обработаны, submission.csv готов")
 
 
 
