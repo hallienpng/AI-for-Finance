@@ -7,6 +7,9 @@ questions.csv
 docs.pkl
 subsis
 
+.env
+.venv
+
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/
